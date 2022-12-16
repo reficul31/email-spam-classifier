@@ -1,0 +1,238 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: CloudFormation stack for Email Spam Classifier for CCBD Assignment 3.
+Parameters:
+  EndpointParameter:
+    Type: String
+    Default: sms-spam-classifier-mxnet-2022-11-26-18-15-31-634
+    Description: AWS Sagemaker endpoint that can classify email as SPAM or HAM.
+  EmailBucketName:
+    Type: String
+    Default: sb4539-hw3-emails
+    Description: Name of the S3 email bucket name
+  DeploymentBucketName:
+    Type: String
+    Default: sb4539-deployment-bucket
+    Description: Name of the deployment bucket containing lambda zip files.
+Resources:
+  EmailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    DependsOn: [SpamClassifierLambda, LambdaInvokePermission]
+    Properties:
+      BucketName: !Ref EmailBucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt SpamClassifierLambda.Arn
+  EmailBucketSESPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Delete
+    DependsOn: EmailBucket
+    Properties:
+      Bucket: !Ref EmailBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Action:
+          - s3:PutObject
+          Effect: Allow
+          Principal:
+              Service: 'ses.amazonaws.com'
+          Resource: !Join
+          - ''
+          - - 'arn:aws:s3:::'
+            - !Ref EmailBucket
+            - /*
+          Condition:
+            StringEquals:
+              'aws:Referer': !Ref AWS::AccountId
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    DeletionPolicy: Delete
+    DependsOn: [SpamClassifierLambda]
+    Properties:
+      FunctionName: !Ref SpamClassifierLambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Join
+        - ''
+        - - 'arn:aws:s3:::'
+          - !Ref EmailBucketName
+  SpamClassifierLambda:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Delete
+    DependsOn:
+      - SpamClassifierLambdaRole
+    Properties:
+      Code:
+        S3Bucket: !Ref DeploymentBucketName
+        S3Key: spam-classifier-lambda.zip
+      Description: ''
+      FunctionName: spam-classifier
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:1
+        - arn:aws:lambda:us-east-1:964937258460:layer:SpamClassifierLayer:2
+      MemorySize: 128
+      PackageType: Zip
+      Role: !GetAtt SpamClassifierLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 10
+      Environment:
+        Variables:
+          SAGEMAKER_ENDPOINT: !Ref EndpointParameter
+  SpamClassifierLambdaRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Delete
+    Properties:
+      RoleName: spam-classifier-lambda-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+            - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonSESFullAccess
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        - PolicyDocument: {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Effect": "Allow",
+                      "Action": "logs:CreateLogGroup",
+                      "Resource": "arn:aws:logs:us-east-1:964937258460:*"
+                  },
+                  {
+                      "Effect": "Allow",
+                      "Action": [
+                          "logs:CreateLogStream",
+                          "logs:PutLogEvents"
+                      ],
+                      "Resource": [
+                          "arn:aws:logs:us-east-1:964937258460:log-group:/aws/lambda/spam-classifier:*"
+                      ]
+                  }
+              ]
+          }
+          PolicyName: AWSLambdaBasicExecutionRole-spam-classifier-lambda
+      Path: /
+  ReceiptRuleSet:
+    Type: 'AWS::SES::ReceiptRuleSet'
+    Properties:
+      RuleSetName: email-receiving
+  DomainReceiveRule:
+    Type: 'AWS::SES::ReceiptRule'
+    Properties:
+      RuleSetName: !Ref ReceiptRuleSet
+      Rule:
+        Name: shbharad-receive-emails
+        Enabled: true
+        ScanEnabled: true
+        TlsPolicy: Optional
+        Actions:
+          - S3Action: 
+              BucketName: !Ref EmailBucket
+  RetrainLambda:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Delete
+    DependsOn:
+      - RetrainLambdaRole
+    Properties:
+      Code:
+        S3Bucket: !Ref DeploymentBucketName
+        S3Key: retrain-lambda.zip
+      Description: ''
+      FunctionName: retrain
+      Handler: lambda_function.lambda_handler
+      MemorySize: 128
+      PackageType: Zip
+      Role: !GetAtt RetrainLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 10
+      Environment:
+        Variables:
+          SAGEMAKER_ENDPOINT: !Ref EndpointParameter
+  RetrainLambdaRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Delete
+    Properties:
+      RoleName: retrain-lambda-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+            - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Policies:
+        - PolicyDocument: {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Effect": "Allow",
+                      "Action": "logs:CreateLogGroup",
+                      "Resource": "arn:aws:logs:us-east-1:964937258460:*"
+                  },
+                  {
+                      "Effect": "Allow",
+                      "Action": [
+                          "logs:CreateLogStream",
+                          "logs:PutLogEvents"
+                      ],
+                      "Resource": [
+                          "arn:aws:logs:us-east-1:964937258460:log-group:/aws/lambda/retrain:*"
+                      ]
+                  }
+              ]
+          }
+          PolicyName: AWSLambdaBasicExecutionRole-retrain-lambda
+      Path: /
+  EventBridgeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    DeletionPolicy: Delete
+    DependsOn: [RetrainLambda]
+    Properties:
+      FunctionName: !Ref RetrainLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: 'arn:aws:events:us-east-1:964937258460:rule/SagemakerTriggerEvent'
+  SagemakerRetrainTrigger:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Delete
+    DependsOn: [RetrainLambda, EventBridgeLambdaPermission]
+    Properties:
+      Name: SagemakerTriggerEvent
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.sagemaker
+        detail-type:
+          - SageMaker Training Job State Change
+      State: ENABLED
+      Targets:
+        - Id: Id725b3932-b2ec-4807-9035-f3e261ba9720
+          Arn: !GetAtt RetrainLambda.Arn
+  RetrainModelTrigger:
+    Type: AWS::Events::Rule
+    DeletionPolicy: Delete
+    Properties:
+      Name: RetrainModelTrigger
+      Description: EventBridge trigger to retrain the model every night at 12AM
+      ScheduleExpression: "cron(0 0 * * ? *)" 
+      State: DISABLED
+      Targets:
+        - Id: Id725b3932-b2ec-4807-9035-sb4539ba9720
+          Arn: !GetAtt RetrainLambda.Arn
